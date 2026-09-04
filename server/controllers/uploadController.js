@@ -1,55 +1,51 @@
 const cloudinary = require("../config/cloudinary");
 
-const uploadMedia = async (req, res) => {
+const validResourceTypes = ["image", "video"];
+
+const createUploadSignature = async (req, res) => {
   try {
-    if (!req.file) {
+    const requestedType =
+      req.body?.resourceType?.toLowerCase();
+
+    if (!validResourceTypes.includes(requestedType)) {
       return res.status(400).json({
         success: false,
-        message: "Please select an image or video",
+        message: "Resource type must be image or video",
       });
     }
 
-    const result = await new Promise((resolve, reject) => {
-      const uploadStream = cloudinary.uploader.upload_stream(
-        {
-          folder: "photographer-portfolio",
-          resource_type: "auto",
-        },
-        (error, uploadedFile) => {
-          if (error) {
-            reject(error);
-          } else {
-            resolve(uploadedFile);
-          }
-        }
-      );
+    const timestamp = Math.round(Date.now() / 1000);
+    const folder = "photographer-portfolio/projects";
 
-      uploadStream.end(req.file.buffer);
-    });
+    const signature = cloudinary.utils.api_sign_request(
+      {
+        timestamp,
+        folder,
+      },
+      process.env.CLOUDINARY_API_SECRET
+    );
 
-    res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message: "Media uploaded successfully",
       data: {
-        url: result.secure_url,
-        publicId: result.public_id,
-        resourceType: result.resource_type,
-        format: result.format,
-        width: result.width,
-        height: result.height,
-        duration: result.duration || null,
+        cloudName: process.env.CLOUDINARY_CLOUD_NAME,
+        apiKey: process.env.CLOUDINARY_API_KEY,
+        timestamp,
+        folder,
+        signature,
+        resourceType: requestedType,
       },
     });
   } catch (error) {
-    console.error("Upload error:", error);
+    console.error("Create upload signature error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: "Unable to upload media",
+      message: "Unable to prepare media upload",
     });
   }
 };
 
 module.exports = {
-  uploadMedia,
+  createUploadSignature,
 };

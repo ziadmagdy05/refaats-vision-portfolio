@@ -1,49 +1,21 @@
 const prisma = require("../config/prisma");
 const cloudinary = require("../config/cloudinary");
 
-const uploadToCloudinary = (fileBuffer, mimetype) => {
-  return new Promise((resolve, reject) => {
-    const resourceType = mimetype.startsWith("video/")
-      ? "video"
-      : "image";
-
-    const uploadStream =
-      cloudinary.uploader.upload_chunked_stream(
-        {
-          folder: "photographer-portfolio/projects",
-          resource_type: resourceType,
-
-          // Cloudinary sends the file in 20 MB pieces
-          chunk_size: 20 * 1024 * 1024,
-        },
-        (error, result) => {
-          if (error) {
-            return reject(error);
-          }
-
-          /*
-           * Cloudinary may return intermediate responses after chunks.
-           * Only resolve when the complete upload has finished.
-           */
-          if (result?.done === false) {
-            return;
-          }
-
-          resolve(result);
-        }
-      );
-
-    uploadStream.on("error", reject);
-    uploadStream.end(fileBuffer);
-  });
-};
+const validResourceTypes = ["image", "video"];
+const projectFolder = "photographer-portfolio/projects/";
 
 const addMediaToProject = async (req, res) => {
-  let uploadedFile;
+  let verifiedAsset;
 
   try {
     const { projectId } = req.params;
-    const { altText, displayOrder } = req.body || {};
+
+    const {
+      publicId,
+      resourceType,
+      altText,
+      displayOrder,
+    } = req.body || {};
 
     const project = await prisma.project.findUnique({
       where: {
@@ -58,35 +30,53 @@ const addMediaToProject = async (req, res) => {
       });
     }
 
-    if (!req.file) {
+    const normalizedResourceType =
+      resourceType?.toLowerCase();
+
+    if (
+      !publicId ||
+      !validResourceTypes.includes(normalizedResourceType)
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Please select an image or video",
+        message:
+          "Cloudinary public ID and resource type are required",
       });
     }
 
-    uploadedFile = await uploadToCloudinary(
-      req.file.buffer,
-      req.file.mimetype
-    );
-
-    if (!uploadedFile?.secure_url) {
-      throw new Error("Cloudinary did not return an uploaded file");
+    if (!publicId.startsWith(projectFolder)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid project media location",
+      });
     }
 
-    const mediaType =
-      uploadedFile.resource_type === "video"
-        ? "VIDEO"
-        : "IMAGE";
+    /*
+     * Verify that the uploaded asset genuinely exists inside
+     * this Cloudinary account. We do not trust a URL supplied
+     * directly by the browser.
+     */
+    verifiedAsset = await cloudinary.api.resource(publicId, {
+      resource_type: normalizedResourceType,
+    });
+
+    if (!verifiedAsset?.secure_url) {
+      throw new Error(
+        "Cloudinary could not verify the uploaded media"
+      );
+    }
 
     const parsedDisplayOrder = Number(displayOrder);
 
     const media = await prisma.media.create({
       data: {
         projectId,
-        type: mediaType,
-        url: uploadedFile.secure_url,
-        publicId: uploadedFile.public_id,
+        type:
+          normalizedResourceType === "video"
+            ? "VIDEO"
+            : "IMAGE",
+        url: verifiedAsset.secure_url,
+        publicId: verifiedAsset.public_id,
         altText: altText?.trim() || null,
         displayOrder: Number.isFinite(parsedDisplayOrder)
           ? parsedDisplayOrder
@@ -104,12 +94,17 @@ const addMediaToProject = async (req, res) => {
   } catch (error) {
     console.error("Add project media error:", error);
 
-    if (uploadedFile?.public_id) {
+    /*
+     * If Cloudinary accepted the upload but Prisma failed,
+     * remove the unused Cloudinary asset.
+     */
+    if (verifiedAsset?.public_id) {
       try {
         await cloudinary.uploader.destroy(
-          uploadedFile.public_id,
+          verifiedAsset.public_id,
           {
-            resource_type: uploadedFile.resource_type,
+            resource_type:
+              verifiedAsset.resource_type || "image",
             invalidate: true,
           }
         );

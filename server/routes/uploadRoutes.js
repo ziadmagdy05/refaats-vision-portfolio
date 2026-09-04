@@ -1,16 +1,17 @@
 const express = require("express");
 
 const protectAdmin = require("../middleware/authMiddleware");
-const upload = require("../middleware/uploadMiddleware");
-const { uploadMedia } = require("../controllers/uploadController");
+
+const {
+  createUploadSignature,
+} = require("../controllers/uploadController");
 
 const router = express.Router();
 
 router.post(
-  "/",
+  "/signature",
   protectAdmin,
-  upload.single("file"),
-  uploadMedia
+  createUploadSignature
 );
 
 module.exports = router;

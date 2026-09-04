@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import api from "../api/api";
 
+const MAX_FILE_SIZE = 300 * 1024 * 1024;
+
 const emptyForm = {
   title: "",
   description: "",
@@ -25,6 +27,11 @@ function ProjectForm({ project, onSaved, onCancel }) {
   const editing = Boolean(project);
 
   useEffect(() => {
+    setCoverFile(null);
+    setGalleryFiles([]);
+    setError("");
+    setUploadProgress("");
+
     if (!project) {
       setForm(emptyForm);
       return;
@@ -38,7 +45,9 @@ function ProjectForm({ project, onSaved, onCancel }) {
       clientName: project.clientName || "",
       location: project.location || "",
       projectDate: project.projectDate
-        ? new Date(project.projectDate).toISOString().slice(0, 10)
+        ? new Date(project.projectDate)
+            .toISOString()
+            .slice(0, 10)
         : "",
       featured: Boolean(project.featured),
       published: Boolean(project.published),
@@ -55,13 +64,167 @@ function ProjectForm({ project, onSaved, onCancel }) {
     }));
   };
 
-  const uploadMedia = async (projectId, file) => {
+  const validateFile = (file) => {
+    if (!file) {
+      throw new Error("Please select a file.");
+    }
+
+    const isImage = file.type.startsWith("image/");
+    const isVideo = file.type.startsWith("video/");
+
+    if (!isImage && !isVideo) {
+      throw new Error(
+        `${file.name} is not a supported image or video.`
+      );
+    }
+
+    if (file.size > MAX_FILE_SIZE) {
+      throw new Error(
+        `${file.name} is larger than the 300 MB limit.`
+      );
+    }
+  };
+
+  const uploadDirectlyToCloudinary = async (
+    file,
+    onProgress
+  ) => {
+    validateFile(file);
+
+    const resourceType = file.type.startsWith("video/")
+      ? "video"
+      : "image";
+
+    const signatureResponse = await api.post(
+      "/uploads/signature",
+      {
+        resourceType,
+      }
+    );
+
+    const uploadDetails =
+      signatureResponse.data?.data ||
+      signatureResponse.data;
+
+    const {
+      cloudName,
+      apiKey,
+      timestamp,
+      folder,
+      signature,
+    } = uploadDetails;
+
+    if (
+      !cloudName ||
+      !apiKey ||
+      !timestamp ||
+      !folder ||
+      !signature
+    ) {
+      throw new Error(
+        "The server did not provide valid upload details."
+      );
+    }
+
     const formData = new FormData();
+
     formData.append("file", file);
+    formData.append("api_key", apiKey);
+    formData.append("timestamp", String(timestamp));
+    formData.append("folder", folder);
+    formData.append("signature", signature);
+
+    const uploadUrl =
+      `https://api.cloudinary.com/v1_1/` +
+      `${cloudName}/${resourceType}/upload`;
+
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+
+      request.open("POST", uploadUrl);
+
+      request.upload.addEventListener(
+        "progress",
+        (event) => {
+          if (!event.lengthComputable) {
+            return;
+          }
+
+          const percentage = Math.round(
+            (event.loaded / event.total) * 100
+          );
+
+          onProgress?.(percentage);
+        }
+      );
+
+      request.addEventListener("load", () => {
+        let response;
+
+        try {
+          response = JSON.parse(request.responseText);
+        } catch {
+          reject(
+            new Error("Cloudinary returned an invalid response.")
+          );
+          return;
+        }
+
+        if (
+          request.status < 200 ||
+          request.status >= 300
+        ) {
+          reject(
+            new Error(
+              response?.error?.message ||
+                "Cloudinary rejected the upload."
+            )
+          );
+          return;
+        }
+
+        resolve(response);
+      });
+
+      request.addEventListener("error", () => {
+        reject(
+          new Error(
+            "The upload connection failed. Please try again."
+          )
+        );
+      });
+
+      request.addEventListener("abort", () => {
+        reject(new Error("The upload was cancelled."));
+      });
+
+      request.send(formData);
+    });
+  };
+
+  const uploadAndRegisterMedia = async (
+    projectId,
+    file,
+    displayOrder,
+    progressLabel
+  ) => {
+    const uploadedFile = await uploadDirectlyToCloudinary(
+      file,
+      (percentage) => {
+        setUploadProgress(
+          `${progressLabel} ${percentage}%`
+        );
+      }
+    );
 
     const response = await api.post(
       `/media/project/${projectId}`,
-      formData
+      {
+        publicId: uploadedFile.public_id,
+        resourceType: uploadedFile.resource_type,
+        altText: file.name,
+        displayOrder,
+      }
     );
 
     return (
@@ -69,6 +232,45 @@ function ProjectForm({ project, onSaved, onCancel }) {
       response.data?.media ||
       response.data?.data
     );
+  };
+
+  const handleCoverSelection = (event) => {
+    const file = event.target.files?.[0] || null;
+
+    try {
+      if (file) {
+        validateFile(file);
+
+        if (!file.type.startsWith("image/")) {
+          throw new Error(
+            "The project cover must be an image."
+          );
+        }
+      }
+
+      setCoverFile(file);
+      setError("");
+    } catch (selectionError) {
+      event.target.value = "";
+      setCoverFile(null);
+      setError(selectionError.message);
+    }
+  };
+
+  const handleGallerySelection = (event) => {
+    const selectedFiles = Array.from(
+      event.target.files || []
+    );
+
+    try {
+      selectedFiles.forEach(validateFile);
+      setGalleryFiles(selectedFiles);
+      setError("");
+    } catch (selectionError) {
+      event.target.value = "";
+      setGalleryFiles([]);
+      setError(selectionError.message);
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -87,7 +289,9 @@ function ProjectForm({ project, onSaved, onCancel }) {
         clientName: form.clientName.trim() || null,
         location: form.location.trim() || null,
         projectDate: form.projectDate
-          ? new Date(`${form.projectDate}T12:00:00`).toISOString()
+          ? new Date(
+              `${form.projectDate}T12:00:00`
+            ).toISOString()
           : null,
         featured: form.featured,
         published: form.published,
@@ -107,7 +311,10 @@ function ProjectForm({ project, onSaved, onCancel }) {
           response.data?.project ||
           response.data?.data;
       } else {
-        const response = await api.post("/projects", payload);
+        const response = await api.post(
+          "/projects",
+          payload
+        );
 
         savedProject =
           response.data?.data?.project ||
@@ -116,17 +323,22 @@ function ProjectForm({ project, onSaved, onCancel }) {
       }
 
       if (!savedProject?.id) {
-        throw new Error("The project could not be saved.");
+        throw new Error(
+          "The project could not be saved."
+        );
       }
 
-      let coverUrl = savedProject.coverUrl || project?.coverUrl || null;
+      let coverUrl =
+        savedProject.coverUrl ||
+        project?.coverUrl ||
+        null;
 
       if (coverFile) {
-        setUploadProgress("Uploading cover image...");
-
-        const coverMedia = await uploadMedia(
+        const coverMedia = await uploadAndRegisterMedia(
           savedProject.id,
-          coverFile
+          coverFile,
+          0,
+          "Uploading cover image:"
         );
 
         coverUrl = coverMedia?.url;
@@ -134,30 +346,35 @@ function ProjectForm({ project, onSaved, onCancel }) {
         if (coverUrl) {
           const response = await api.put(
             `/projects/${savedProject.id}`,
-            { coverUrl }
+            {
+              coverUrl,
+            }
           );
 
           savedProject =
             response.data?.data?.project ||
             response.data?.project ||
-            response.data?.data ||
-            {
+            response.data?.data || {
               ...savedProject,
               coverUrl,
             };
         }
       }
 
-      for (let index = 0; index < galleryFiles.length; index += 1) {
-        setUploadProgress(
+      for (
+        let index = 0;
+        index < galleryFiles.length;
+        index += 1
+      ) {
+        const file = galleryFiles[index];
+
+        await uploadAndRegisterMedia(
+          savedProject.id,
+          file,
+          index + 1,
           `Uploading gallery file ${index + 1} of ${
             galleryFiles.length
-          }...`
-        );
-
-        await uploadMedia(
-          savedProject.id,
-          galleryFiles[index]
+          }:`
         );
       }
 
@@ -187,10 +404,16 @@ function ProjectForm({ project, onSaved, onCancel }) {
         <header className="project-form-header">
           <div>
             <p className="eyebrow">
-              {editing ? "Update portfolio" : "New portfolio entry"}
+              {editing
+                ? "Update portfolio"
+                : "New portfolio entry"}
             </p>
 
-            <h2>{editing ? "Edit project" : "Add project"}</h2>
+            <h2>
+              {editing
+                ? "Edit project"
+                : "Add project"}
+            </h2>
           </div>
 
           <button
@@ -203,7 +426,10 @@ function ProjectForm({ project, onSaved, onCancel }) {
           </button>
         </header>
 
-        <form className="project-admin-form" onSubmit={handleSubmit}>
+        <form
+          className="project-admin-form"
+          onSubmit={handleSubmit}
+        >
           <div className="admin-form-row">
             <label>
               Project title
@@ -251,9 +477,17 @@ function ProjectForm({ project, onSaved, onCancel }) {
                 onChange={handleChange}
                 required
               >
-                <option value="PHOTOGRAPHY">Photography</option>
-                <option value="VIDEOGRAPHY">Videography</option>
-                <option value="MIXED">Mixed</option>
+                <option value="PHOTOGRAPHY">
+                  Photography
+                </option>
+
+                <option value="VIDEOGRAPHY">
+                  Videography
+                </option>
+
+                <option value="MIXED">
+                  Mixed
+                </option>
               </select>
             </label>
 
@@ -332,14 +566,16 @@ function ProjectForm({ project, onSaved, onCancel }) {
             <input
               type="file"
               accept="image/*"
-              onChange={(event) =>
-                setCoverFile(event.target.files?.[0] || null)
-              }
+              onChange={handleCoverSelection}
             />
 
             <span>
               {coverFile
-                ? coverFile.name
+                ? `${coverFile.name} (${(
+                    coverFile.size /
+                    1024 /
+                    1024
+                  ).toFixed(1)} MB)`
                 : editing && project?.coverUrl
                   ? "Keep current cover image"
                   : "Choose a cover image"}
@@ -352,9 +588,7 @@ function ProjectForm({ project, onSaved, onCancel }) {
               type="file"
               accept="image/*,video/*"
               multiple
-              onChange={(event) =>
-                setGalleryFiles(Array.from(event.target.files || []))
-              }
+              onChange={handleGallerySelection}
             />
 
             <span>
@@ -370,7 +604,9 @@ function ProjectForm({ project, onSaved, onCancel }) {
             </p>
           )}
 
-          {error && <p className="form-error">{error}</p>}
+          {error && (
+            <p className="form-error">{error}</p>
+          )}
 
           <div className="project-form-actions">
             <button
@@ -388,7 +624,7 @@ function ProjectForm({ project, onSaved, onCancel }) {
               disabled={saving}
             >
               {saving
-                ? "Saving project..."
+                ? uploadProgress || "Saving project..."
                 : editing
                   ? "Save changes"
                   : "Create project"}
